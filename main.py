@@ -144,7 +144,7 @@ def main():
 #         agent_say(chatbot(input('>')))
 
 
-def run_command(cmd: str, cwd: str) -> (int, str, str):
+def run_command(cmd: str, cwd: str, extra_env=None) -> (int, str, str):
 
     def get_terminal_size():
         """获取当前终端的行数和列数"""
@@ -200,6 +200,10 @@ def run_command(cmd: str, cwd: str) -> (int, str, str):
     # 设置伪终端的窗口尺寸
     set_pty_size(master_fd)
 
+    final_env = dict(os.environ, TERM=os.environ.get('TERM', 'xterm'))
+    if extra_env:
+        final_env.update(extra_env)
+
     # 启动子进程，将stdout和stdin绑定到伪终端，stderr使用管道
     proc = subprocess.Popen(
         [cmd],  # 替换为实际命令
@@ -208,7 +212,7 @@ def run_command(cmd: str, cwd: str) -> (int, str, str):
         stdout=slave_fd,
         stderr=subprocess.PIPE,  # stderr通过普通管道传输
         close_fds=True,
-        env=dict(os.environ, TERM=os.environ.get('TERM', 'xterm')),  # 传递终端类型
+        env=final_env,  # 传递终端类型
         #preexec_fn=os.setsid,  # 创建新进程组以正确处理信号
         shell=True)
 
@@ -250,31 +254,55 @@ class Runner:
 
     def __init__(self):
         self.cwd = os.getcwd()
+        self.env = {}  # 初始化环境变量
 
     def __call__(self, cmd: str) -> (int, str, str):
         stdout = ""
         stderr = ""
-        for c in cmd.split("&&"):
+        commands = cmd.split("&&")
+        for c in commands:
             c = c.strip()
-            if c.startswith("cd"):
-                dir_name = c.split(' ')[-1]
+            # 处理cd命令
+            if c.startswith("cd "):
+                # 原有cd处理逻辑
+                dir_name = c.split(' ', 1)[-1].strip()
                 directory = os.path.join(self.cwd,
                                          os.path.expanduser(dir_name))
                 if not os.path.exists(directory):
-                    stderr += f"cd: The directory '{directory}' does not exist\n"
+                    stderr += f"cd: no such directory: {directory}\n"
                     return (255, stdout, stderr)
                 elif not os.path.isdir(directory):
-                    stderr += f"cd: {directory} is not a directory\n"
+                    stderr += f"cd: not a directory: {directory}\n"
                     return (255, stdout, stderr)
+                self.cwd = directory
+                continue
+            # 处理export命令
+            elif c.startswith("export "):
+                rest = c[len('export '):].strip()
+                if '=' in rest:
+                    var_name, value = rest.split('=', 1)
+                    var_name = var_name.strip()
+                    value = value.strip()
+                    # 去除值两侧的引号
+                    if len(value) >= 2 and (value[0] == value[-1]
+                                            and value[0] in ('"', "'")):
+                        value = value[1:-1]
+                    self.env[var_name] = value
                 else:
-                    self.cwd = directory
-                    continue
-            else:
-                (code, out, err) = run_command(c, cwd=self.cwd)
-                stdout += out
-                stderr += err
-                if code != 0:
-                    return (code, stdout, stderr)
+                    # 处理export VAR（无赋值）
+                    var_name = rest.strip()
+                    if var_name in self.env:
+                        # 保持原值，或设为空字符串
+                        pass  # 这里不做修改，因为export VAR可能只是导出已存在的变量
+                    else:
+                        self.env[var_name] = ''
+                continue
+            # 执行其他命令
+            (code, out, err) = run_command(c, cwd=self.cwd, extra_env=self.env)
+            stdout += out
+            stderr += err
+            if code != 0:
+                return (code, stdout, stderr)
         return (0, stdout, stderr)
 
 
