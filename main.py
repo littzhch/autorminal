@@ -12,6 +12,7 @@ import getpass
 from threading import Thread
 
 from openai import OpenAI
+import pyte
 
 
 class DSChat(ABC):
@@ -244,8 +245,8 @@ def run_command(cmd: str, cwd: str, extra_env=None) -> (int, str, str):
     stderr_thread.join()
 
     # 合并结果
-    final_stdout = ''.join(stdout_data)
-    final_stderr = ''.join(stderr_data)
+    final_stdout = get_final_text(''.join(stdout_data))
+    final_stderr = get_final_text(''.join(stderr_data))
 
     return proc.returncode, final_stdout, final_stderr
 
@@ -325,6 +326,18 @@ def agent_input(*args, **kwargs):
     print("\033[0m", end="")
     sys.stdout.flush()
     return result
+
+
+def get_final_text(input_str):
+    # 设置足够大的行数和列数以避免截断
+    screen = pyte.Screen(500, 3000)  # 列数，行数
+    stream = pyte.Stream(screen)
+    stream.feed(input_str)
+
+    # 提取处理后的行并去除每行末尾的空格
+    final_lines = [line.rstrip() for line in screen.display]
+    # 合并行并用换行符连接，同时去除末尾的空白行
+    return '\n'.join(final_lines).rstrip('\n')
 
 
 if __name__ == "__main__":
