@@ -19,7 +19,7 @@ import pyte
 class DSChat(ABC):
 
     @abstractmethod
-    def __init__(self, sys_prompt, client, model) -> None:
+    def __init__(self, sys_prompt, client, model, temperature) -> None:
         pass
 
     @abstractmethod
@@ -29,43 +29,46 @@ class DSChat(ABC):
 
 class StatelessChat(DSChat):
 
-    def __init__(self, sys_prompt, client, model):
+    def __init__(self, sys_prompt, client, model, temperature=0.3):
         self.sys_prompt = sys_prompt
         self.model = model
         self.client = client
+        self.temperature = temperature
 
     def __call__(self, content) -> str:
-        response = self.client.chat.completions.create(model=self.model,
-                                                       messages=[{
-                                                           "role":
-                                                           "system",
-                                                           "content":
-                                                           self.sys_prompt
-                                                       }, {
-                                                           "role":
-                                                           "user",
-                                                           "content":
-                                                           content,
-                                                       }],
-                                                       stream=False)
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{
+                "role": "system",
+                "content": self.sys_prompt
+            }, {
+                "role": "user",
+                "content": content,
+            }],
+            temperature=self.temperature,
+            stream=False,
+        )
         return response.choices[0].message.content
 
 
 class ChatBot(DSChat):
 
-    def __init__(self, sys_prompt, client, model):
+    def __init__(self, sys_prompt, client, model, temperature=0.3):
         self.model = model
         self.messages = [{"role": "system", "content": sys_prompt}]
         self.client = client
+        self.temperature = temperature
 
     def __call__(self, content) -> str:
         self.messages.append({
             "role": "user",
             "content": content,
         })
-        response = self.client.chat.completions.create(model=self.model,
-                                                       messages=self.messages,
-                                                       stream=False)
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=self.messages,
+            temperature=self.temperature,
+            stream=False)
         result = response.choices[0].message.content
         self.messages.append({"role": "assistant", "content": result})
         return result
@@ -94,13 +97,19 @@ def main():
 
     client = OpenAI(api_key=args.llm_key, base_url=args.llm_url)
 
-    system_prompt = "你是一个专门执行 linux 命令的 AI，你的工作是读取 user 的诉求，决定下一步需要执行的命令。\
-注意，每次只需要执行一条命令即可, cd 命令是可以正确执行的。输出格式为\
-{ \"finished\": true|false, \"idea\": \"你的思路\", \"cmd\": \"ls -l xxx\"}。\
-⚠️注意：每次请只执行一条指令，不要使用 && 或者 ; 连接多条命令。\
+    system_prompt = """\
+你是一个擅长执行类unix终端命令的专家，你可以控制 user 的终端。\
+你的工作是根据 user 的诉求和已经执行的命令，\
+决定下一步需要在终端执行的命令。
+输出格式为 JSON:
+{ \"finished\": true|false, \"idea\": \"你的思路\", \"cmd\": \"ls -l xxx\"}
 当你认为任务已经完成的时候，请将 finished 设置为 true, 并在 idea 中向用户汇报任务结果；\
-如果你觉得任务还要继续，请在 idea 当中简单说一下你下一步的思路，并在 cmd 中给出下一步的命令，\
-在任何情况下请不要输出任何其它内容。"
+如果你觉得任务还要继续，请在 idea 当中简单说一下你下一步的思路，并在 cmd 中给出下一步的命令。
+注意：
+1. 在任何情况下请不要输出任何其它内容
+2. 一次请只执行一条命令
+3. 可以执行 cd 命令
+"""
 
     bot = ChatBot(system_prompt, client=client, model=args.llm_model)
     if args.prompt:
