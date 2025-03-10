@@ -152,18 +152,10 @@ def main():
     agent_print(bot_words["idea"])
 
 
-# def main():
-#     chatbot = ChatBot(sys_prompt="你是一只可爱的猫娘呀～每句话都要以喵结尾～")
-#     while True:
-#         agent_say(chatbot(input('>')))
-
-
-def run_command(cmd: str, cwd: str, extra_env=None) -> (int, str, str):
+def run_command(cmd: str, cwd: str, extra_env=None) -> tuple[int, str, str]:
 
     def get_terminal_size():
-        """获取当前终端的行数和列数"""
         try:
-            # 通过标准输出的文件描述符获取窗口尺寸
             fd = sys.stdout.fileno()
             hw = struct.unpack(
                 'hhhh',
@@ -171,21 +163,18 @@ def run_command(cmd: str, cwd: str, extra_env=None) -> (int, str, str):
                             struct.pack('hhhh', 0, 0, 0, 0)))
             return (hw[0], hw[1])
         except Exception:
-            return (24, 80)  # 默认值（行数24，列数80）
+            return (24, 80)
 
     def set_pty_size(fd):
-        """设置伪终端的窗口尺寸"""
         rows, cols = get_terminal_size()
-        # 构造TIOCSWINSZ命令所需的结构体
         size = struct.pack('hhhh', rows, cols, 0, 0)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, size)
 
     def read_stdout(fd, output):
-        """从伪终端读取stdout并实时显示"""
         while True:
             try:
                 data = os.read(fd, 1024)
-            except OSError:  # 当伪终端关闭时退出
+            except OSError:
                 break
             if not data:
                 break
@@ -195,7 +184,6 @@ def run_command(cmd: str, cwd: str, extra_env=None) -> (int, str, str):
             sys.stdout.flush()
 
     def read_stderr(pipe, output):
-        """从管道读取stderr并实时显示"""
         while True:
             data = os.read(pipe.fileno(), 1024)
             if not data:
@@ -205,59 +193,44 @@ def run_command(cmd: str, cwd: str, extra_env=None) -> (int, str, str):
             sys.stderr.write(decoded)
             sys.stderr.flush()
 
-    # 获取当前终端尺寸
     rows, cols = get_terminal_size()
-
-    # 创建伪终端（主端和从端）
     master_fd, slave_fd = pty.openpty()
-
-    # 设置伪终端的窗口尺寸
     set_pty_size(master_fd)
 
     final_env = dict(os.environ, TERM=os.environ.get('TERM', 'xterm'))
     if extra_env:
         final_env.update(extra_env)
 
-    # 启动子进程，将stdout和stdin绑定到伪终端，stderr使用管道
     proc = subprocess.Popen(
-        [cmd],  # 替换为实际命令
+        [cmd],
         cwd=cwd,
         stdin=None,
         stdout=slave_fd,
-        stderr=subprocess.PIPE,  # stderr通过普通管道传输
+        stderr=subprocess.PIPE,
         close_fds=True,
-        env=final_env,  # 传递终端类型
-        #preexec_fn=os.setsid,  # 创建新进程组以正确处理信号
+        env=final_env,
+        #preexec_fn=os.setsid,
         shell=True)
 
-    # 关闭子进程不需要的从端文件描述符
     os.close(slave_fd)
 
-    # 存储输出的容器
     stdout_data = []
     stderr_data = []
 
-    # 启动线程读取stdout（通过伪终端主端）
     stdout_thread = Thread(target=read_stdout, args=(master_fd, stdout_data))
     stdout_thread.daemon = True
     stdout_thread.start()
-
-    # 启动线程读取stderr（通过管道）
     stderr_thread = Thread(target=read_stderr, args=(proc.stderr, stderr_data))
     stderr_thread.daemon = True
     stderr_thread.start()
 
-    # 等待子进程结束
     proc.wait()
 
-    # 关闭伪终端主端
     os.close(master_fd)
 
-    # 等待线程结束
     stdout_thread.join()
     stderr_thread.join()
 
-    # 合并结果
     final_stdout = get_final_text(''.join(stdout_data))
     final_stderr = get_final_text(''.join(stderr_data))
 
@@ -268,7 +241,7 @@ class Runner:
 
     def __init__(self):
         self.cwd = os.getcwd()
-        self.env = {}  # 初始化环境变量
+        self.env = {}
 
     def __call__(self, cmd: str) -> (int, str, str):
         stdout = ""
@@ -276,9 +249,7 @@ class Runner:
         commands = cmd.split("&&")
         for c in commands:
             c = c.strip()
-            # 处理cd命令
             if c.startswith("cd "):
-                # 原有cd处理逻辑
                 dir_name = c.split(' ', 1)[-1].strip()
                 directory = os.path.join(self.cwd,
                                          os.path.expanduser(dir_name))
@@ -290,28 +261,24 @@ class Runner:
                     return (255, stdout, stderr)
                 self.cwd = directory
                 continue
-            # 处理export命令
-            elif c.startswith("export "):
+            elif c.startswith(
+                    "export "):  # TODO support "" and multi variables
                 rest = c[len('export '):].strip()
                 if '=' in rest:
                     var_name, value = rest.split('=', 1)
                     var_name = var_name.strip()
                     value = value.strip()
-                    # 去除值两侧的引号
                     if len(value) >= 2 and (value[0] == value[-1]
                                             and value[0] in ('"', "'")):
                         value = value[1:-1]
                     self.env[var_name] = value
                 else:
-                    # 处理export VAR（无赋值）
                     var_name = rest.strip()
                     if var_name in self.env:
-                        # 保持原值，或设为空字符串
-                        pass  # 这里不做修改，因为export VAR可能只是导出已存在的变量
+                        pass
                     else:
                         self.env[var_name] = ''
                 continue
-            # 执行其他命令
             (code, out, err) = run_command(c, cwd=self.cwd, extra_env=self.env)
             stdout += out
             stderr += err
@@ -343,14 +310,10 @@ def agent_input(*args, **kwargs):
 
 
 def get_final_text(input_str):
-    # 设置足够大的行数和列数以避免截断
-    screen = pyte.Screen(500, 3000)  # 列数，行数
+    screen = pyte.Screen(500, 3000)
     stream = pyte.Stream(screen)
     stream.feed(input_str)
-
-    # 提取处理后的行并去除每行末尾的空格
     final_lines = [line.rstrip() for line in screen.display]
-    # 合并行并用换行符连接，同时去除末尾的空白行
     return '\n'.join(final_lines).rstrip('\n')
 
 
