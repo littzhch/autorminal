@@ -7,6 +7,7 @@ import struct
 import argparse
 import subprocess
 import json
+from io import StringIO
 from abc import ABC, abstractmethod
 import getpass
 from threading import Thread
@@ -105,17 +106,17 @@ def main():
     if args.prompt:
         bot_words = args.prompt
     else:
-        bot_words = bot(agent_input("你想干啥 > "))
+        bot_words = bot(agent_input("Your prompt > "))
     runner = Runner()
     user_name = getpass.getuser()
     first = True
 
     while True:
         bot_words = json.loads(bot_words)
-        agent_print(bot_words["idea"])
         if bot_words["finished"] and not first:
             break
         first = False
+        agent_print(bot_words["idea"])
         cmd: str = bot_words["cmd"]
         agent_print_cmd(cmd)
         if (not args.no_check) and (user := agent_input(
@@ -137,6 +138,9 @@ def main():
                 "stderr": stderr
             }
         bot_words = bot(str(ret))
+
+    summary_print(bot.messages)
+    agent_print(bot_words["idea"])
 
 
 # def main():
@@ -308,23 +312,24 @@ class Runner:
 
 
 def agent_print(*args, **kwargs):
-    print("\033[94m[Agent] ", end="")
-    print(*args, **kwargs)
-    print("\033[0m", end="")
-    sys.stdout.flush()
+    print("\033[94m", end="")
+    sio = StringIO()
+    print(*args, **kwargs, file=sio)
+    sio.seek(0)
+    for line in sio.readlines():
+        print("[Agent]", line, end="")
+    print("\033[0m", end="", flush=True)
 
 
 def agent_print_cmd(cmd: str):
-    agent_print("", end="")
-    print(f"\033[93m{cmd}\033[0m")
+    print(f"\033[94m[Agent]\033[0m \033[93m{cmd}\033[0m", flush=True)
 
 
 def agent_input(*args, **kwargs):
     print("\033[94m[Agent]\033[0m ", end="")
     print("\033[94m", end="")
     result = input(*args, **kwargs)
-    print("\033[0m", end="")
-    sys.stdout.flush()
+    print("\033[0m", end="", flush=True)
     return result
 
 
@@ -338,6 +343,15 @@ def get_final_text(input_str):
     final_lines = [line.rstrip() for line in screen.display]
     # 合并行并用换行符连接，同时去除末尾的空白行
     return '\n'.join(final_lines).rstrip('\n')
+
+
+def summary_print(messages: list):
+    agent_print("SUMMARY")
+    for message in messages:
+        if message["role"] == "assistant":
+            cmd = json.loads(message["content"])["cmd"].strip()
+            if cmd != "":
+                agent_print_cmd(cmd)
 
 
 if __name__ == "__main__":
