@@ -5,7 +5,7 @@
 ## 使用说明
 ```bash
 pip install -r requirements.txt
-python3 main.py --llm-key sk-yoour-ds-key
+python3 main.py --llm-key sk-your-ds-key # 默认使用 api.deepseek.com 的 DeepSeek V3
 ```
 
 ## LICENSE
