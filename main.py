@@ -45,9 +45,19 @@ class StatelessChat(DSChat):
                 "content": content,
             }],
             temperature=self.temperature,
-            stream=False,
+            stream=True,
         )
-        return response.choices[0].message.content
+
+        result = ""
+
+        for chunk in response:
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                if (not hasattr(delta, 'reasoning_content')
+                    ) or delta.reasoning_content is None:
+                    result += delta.content
+
+        return result
 
 
 class ChatBot(DSChat):
@@ -67,8 +77,17 @@ class ChatBot(DSChat):
             model=self.model,
             messages=self.messages,
             temperature=self.temperature,
-            stream=False)
-        result = response.choices[0].message.content
+            stream=True)
+
+        result = ""
+
+        for chunk in response:
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                if (not hasattr(delta, 'reasoning_content')
+                    ) or delta.reasoning_content is None:
+                    result += delta.content
+
         self.messages.append({"role": "assistant", "content": result})
         return result
 
