@@ -98,6 +98,10 @@ class ChatBot(DSChat):
         user = self.messages.pop()["content"]
         return self(user)
 
+    def replace_last_reply(self, new_content):
+        assert self.messages[-1]["role"] == "assistant"
+        self.messages[-1]["content"] = new_content
+
     def clear_ctx(self):
         self.messages = [self.messages[0]]
 
@@ -131,7 +135,7 @@ def main():
 当你认为任务已经完成的时候，请将 finished 设置为 true, 并在 idea 中向用户汇报任务结果；\
 如果你觉得任务还要继续，请在 idea 当中简单说一下你下一步的思路，并在 cmd 中给出下一步的命令。
 注意：
-1. 在任何情况下请不要输出任何其它内容
+1. 输出以 { 开始， } 结束，在任何情况下请不要输出任何其它内容
 2. 一次请只执行一条命令
 3. 可以执行 cd 命令
 """
@@ -153,9 +157,15 @@ def main():
             agent_print("llm output parsing failed:", bot_words, "retry...")
             bot_words = bot.retry()
             continue
-        if bot_words["finished"] and not first:
+
+        if bot_words["finished"] and (first or bot_words["cmd"] != ""):
+            bot_words["finished"] = False
+            first = False
+            bot.replace_last_reply(json.dumps(bot_words, ensure_ascii=False))
+
+        if bot_words["finished"]:
             break
-        first = False
+
         agent_print(bot_words["idea"])
         cmd: str = bot_words["cmd"]
         agent_print_cmd(cmd)
@@ -223,29 +233,36 @@ class Runner:
 
     def __copy_output(self, echo=True) -> bytes:
         output = b''
+        stdout_buffer = []
         while True:
             data = self.__read_output_all()
             if len(data) == 0:
                 continue
             if bytes(self.end_str, encoding="utf-8") not in data:
                 if echo:
-                    try:
-                        sys.stdout.buffer.write(data)
-                        sys.stdout.flush()
-                    except BlockingIOError:
-                        pass
+                    stdout_buffer.append(data)
                 output += data
             else:
                 break
+            while len(stdout_buffer) > 0:
+                try:
+                    sys.stdout.buffer.write(stdout_buffer[0])
+                    stdout_buffer.pop(0)
+                    sys.stdout.flush()
+                except BlockingIOError:
+                    break
 
         data, _ = data.split(bytes(self.end_str, encoding="utf-8"), 1)
-        if echo:
-            try:
-                sys.stdout.buffer.write(data)
-                sys.stdout.flush()
-            except BlockingIOError:
-                pass
         output += data
+        if echo:
+            stdout_buffer.append(data)
+            while len(stdout_buffer) > 0:
+                try:
+                    sys.stdout.buffer.write(stdout_buffer[0])
+                    stdout_buffer.pop(0)
+                    sys.stdout.flush()
+                except BlockingIOError:
+                    pass
 
         return output
 
