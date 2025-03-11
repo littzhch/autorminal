@@ -188,9 +188,10 @@ def main():
 class Runner:
 
     def __init__(self):
-        self.proc = pexpect.spawn("sh",
-                                  echo=True,
-                                  env=os.environ.update({"TERM": "linux"}))
+        self.proc = pexpect.spawn(
+            "bash --posix",
+            echo=True,
+        )
         self.__update_win_size()
         # end_str 不要直接写出来，不然 cat main.py 会出问题
         self.end_str = "\x5f\x5f\x41\x55\x54\x4f\x52\x4d\x49\x4e\x41\x4c\x5f\x45\x4e\x44\x5f\x5f"
