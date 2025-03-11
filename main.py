@@ -131,8 +131,8 @@ def main():
 你的工作是根据 user 的诉求和已经执行的命令，\
 决定下一步需要在终端执行的命令。
 输出格式为 JSON:
-{ \"finished\": true|false, \"idea\": \"你的思路\", \"cmd\": \"ls -l xxx\"}
-当你认为任务已经完成的时候，请将 finished 设置为 true, 并在 idea 中向用户汇报任务结果；\
+{ \"idea\": \"你的思路\", \"cmd\": \"ls -l xxx\"}
+当你认为任务已经完成的时候，请在 idea 中向用户汇报任务结果，并将 cmd 设置为空；\
 如果你觉得任务还要继续，请在 idea 当中简单说一下你下一步的思路，并在 cmd 中给出下一步的命令。
 注意：
 1. 输出以 { 开始， } 结束，在任何情况下请不要输出任何其它内容
@@ -148,7 +148,6 @@ def main():
     bot_words = bot(user_prompt)
     runner = Runner()
     user_name = getpass.getuser()
-    first = True
 
     while True:
         try:
@@ -158,12 +157,7 @@ def main():
             bot_words = bot.retry()
             continue
 
-        if bot_words["finished"] and (first or bot_words["cmd"] != ""):
-            bot_words["finished"] = False
-            first = False
-            bot.replace_last_reply(json.dumps(bot_words, ensure_ascii=False))
-
-        if bot_words["finished"]:
+        if bot_words["cmd"] == "":
             break
 
         agent_print(bot_words["idea"])
@@ -201,7 +195,7 @@ class Runner:
         # end_str 不要直接写出来，不然 cat main.py 会出问题
         self.end_str = "\x5f\x5f\x41\x55\x54\x4f\x52\x4d\x49\x4e\x41\x4c\x5f\x45\x4e\x44\x5f\x5f"
         self.stop = Event()
-        self.proc.send(f"export PS1={self.end_str}\n")
+        self.proc.send(f"PROMPT_COMMAND=\"PS1={self.end_str}\"\n")
 
     def __update_win_size(self):
         try:
