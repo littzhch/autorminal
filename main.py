@@ -91,6 +91,13 @@ class ChatBot(DSChat):
         self.messages.append({"role": "assistant", "content": result})
         return result
 
+    def retry(self):
+        assert self.messages[-1]["role"] == "assistant"
+        assert self.messages[-2]["role"] == "user"
+        self.messages.pop()
+        user = self.messages.pop()["content"]
+        return self(user)
+
     def clear_ctx(self):
         self.messages = [self.messages[0]]
 
@@ -140,7 +147,12 @@ def main():
     first = True
 
     while True:
-        bot_words = json.loads(bot_words)
+        try:
+            bot_words = json.loads(bot_words)
+        except json.JSONDecodeError:
+            agent_print("llm output parsing failed:", bot_words, "retry...")
+            bot_words = bot.retry()
+            continue
         if bot_words["finished"] and not first:
             break
         first = False
