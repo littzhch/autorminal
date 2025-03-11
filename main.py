@@ -112,9 +112,10 @@ def main():
 
     bot = ChatBot(system_prompt, client=client, model=args.llm_model)
     if args.prompt:
-        bot_words = args.prompt
+        user_prompt = args.prompt
     else:
-        bot_words = bot(agent_input("Your prompt > "))
+        user_prompt = agent_input("Your prompt > ")
+    bot_words = bot(user_prompt)
     runner = Runner()
     user_name = getpass.getuser()
     first = True
@@ -141,7 +142,7 @@ def main():
                 "user": user_name,
                 "cwd": runner.cwd(),
                 "return_code": ret_code,
-                "stdout": output,
+                "output": output,
             }
         bot_words = bot(str(ret))
 
