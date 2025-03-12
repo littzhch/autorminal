@@ -197,10 +197,11 @@ class Runner:
         self.end_str = b"\x5f\x5f\x41\x55\x54\x4f\x52\x4d\x49\x4e\x41\x4c\x5f\x45\x4e\x44\x5f\x5f"
 
         self.copy_input_run = Event()
-        self.proc.send(f"PROMPT_COMMAND=\"PS1={self.end_str.decode()}\"\n")
         self.copy_input_thread = Thread(target=self.__copy_input)
         self.copy_input_thread.daemon = True
         self.copy_input_thread.start()
+        self.proc.send(f"PROMPT_COMMAND=\"PS1={self.end_str.decode()}\"\n")
+        self.__run_simple("readonly PROMPT_COMMAND")
 
     def __update_win_size(self):
         try:
