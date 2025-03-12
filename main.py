@@ -4,15 +4,18 @@ import fcntl
 import termios
 import struct
 import argparse
+import select
 import json
 from io import StringIO
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 import getpass
 from threading import Thread, Event
+import subprocess
+import pty
 
 from openai import OpenAI
 import pyte
-import pexpect
 
 
 class DSChat(ABC):
@@ -188,15 +191,16 @@ def main():
 class Runner:
 
     def __init__(self):
-        self.proc = pexpect.spawn(
-            "bash --posix",
-            echo=True,
-        )
+        self.proc = Terminal("bash --posix")
         self.__update_win_size()
         # end_str 不要直接写出来，不然 cat main.py 会出问题
-        self.end_str = "\x5f\x5f\x41\x55\x54\x4f\x52\x4d\x49\x4e\x41\x4c\x5f\x45\x4e\x44\x5f\x5f"
-        self.stop = Event()
-        self.proc.send(f"PROMPT_COMMAND=\"PS1={self.end_str}\"\n")
+        self.end_str = b"\x5f\x5f\x41\x55\x54\x4f\x52\x4d\x49\x4e\x41\x4c\x5f\x45\x4e\x44\x5f\x5f"
+
+        self.copy_input_run = Event()
+        self.proc.send(f"PROMPT_COMMAND=\"PS1={self.end_str.decode()}\"\n")
+        self.copy_input_thread = Thread(target=self.__copy_input)
+        self.copy_input_thread.daemon = True
+        self.copy_input_thread.start()
 
     def __update_win_size(self):
         try:
@@ -209,56 +213,59 @@ class Runner:
         except Exception:
             pass
 
-    def __copy_stdin(self):
-        while not self.stop.is_set():
-            ch = sys.stdin.read(1)
-            if ch != '':
+    def __copy_input(self):
+        while self.copy_input_run.wait():
+            readable, _, _ = select.select([sys.stdin], [], [])
+            if sys.stdin not in readable:
+                continue
+            ch = sys.stdin.buffer.read(4096)
+            if ch is not None:
                 self.proc.send(ch)
 
-    def __read_output_all(self) -> bytes:
-        result = b''
+    def __clean_output(self):
         while True:
             try:
-                data = self.proc.read_nonblocking(1024, timeout=0.1)
-            except Exception:
+                self.proc.read_nonblocking(4096)
+            except BlockingIOError:
                 break
-            if data:
-                result += data
-        return result
 
-    def __copy_output(self, echo=True) -> bytes:
+    def __copy_output(self) -> bytes:
         output = b''
-        stdout_buffer = []
+        stdout_ptr = 0
+        end_str_len = len(self.end_str)
+        while self.end_str not in output:
+            try:
+                if len(output) - stdout_ptr > end_str_len:
+                    sys.stdout.buffer.write(output[stdout_ptr:-end_str_len])
+                    stdout_ptr = len(output) - end_str_len
+                for _ in range(0, len(output) - stdout_ptr):
+                    if not self.end_str.startswith(output[stdout_ptr:]):
+                        sys.stdout.buffer.write(output[stdout_ptr:stdout_ptr +
+                                                       1])
+                        stdout_ptr += 1
+                    else:
+                        break
+                sys.stdout.flush()
+            except BlockingIOError:
+                pass
+
+            output += self.proc.read(4096)
+
         while True:
-            data = self.__read_output_all()
-            if len(data) == 0:
-                continue
-            if bytes(self.end_str, encoding="utf-8") not in data:
-                if echo:
-                    stdout_buffer.append(data)
-                output += data
-            else:
+            try:
+                sys.stdout.buffer.write(output[stdout_ptr:-end_str_len])
                 break
-            while len(stdout_buffer) > 0:
-                try:
-                    sys.stdout.buffer.write(stdout_buffer[0])
-                    stdout_buffer.pop(0)
-                    sys.stdout.flush()
-                except BlockingIOError:
-                    break
+            except BlockingIOError:
+                pass
 
-        data, _ = data.split(bytes(self.end_str, encoding="utf-8"), 1)
-        output += data
-        if echo:
-            stdout_buffer.append(data)
-            while len(stdout_buffer) > 0:
-                try:
-                    sys.stdout.buffer.write(stdout_buffer[0])
-                    stdout_buffer.pop(0)
-                    sys.stdout.flush()
-                except BlockingIOError:
-                    pass
+        while True:
+            try:
+                sys.stdout.flush()
+                break
+            except BlockingIOError:
+                pass
 
+        output = output.split(self.end_str, 1)[0]
         return output
 
     def __get_final_text(self, input_bytes):
@@ -268,7 +275,43 @@ class Runner:
         final_lines = [line.rstrip() for line in screen.display]
         return '\n'.join(final_lines).rstrip('\n')
 
-    def __setup_terminal(self):
+    def cwd(self) -> str:
+        path = self.__run_simple("pwd")
+        return path
+
+    def __last_ret_code(self) -> int:
+        code = self.__run_simple("echo $?")
+        return int(code)
+
+    def __run_simple(self, cmd) -> str:
+        self.__clean_output()
+        cmd = bytes(cmd + '\n', encoding="utf-8")
+        self.proc.send(cmd)
+        self.proc.read_exact(len(cmd) + 1)
+        result = b''
+        while self.end_str not in result:
+            result += self.proc.read(1024)
+        result = self.__get_final_text(result.split(self.end_str)[0])
+        return result
+
+    def __call__(self, cmd: str) -> tuple[int, str]:
+        self.__update_win_size()
+        self.__clean_output()
+
+        cmd = bytes(cmd + '\n', encoding="utf-8")
+        self.proc.send(cmd)
+        self.proc.read_exact(len(cmd) + 1)
+
+        with self.__running_context():
+            output = self.__copy_output()
+
+        output = self.__get_final_text(output)
+        code = self.__last_ret_code()
+
+        return code, output
+
+    @contextmanager
+    def __running_context(self):
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
         new_settings = termios.tcgetattr(fd)
@@ -276,46 +319,61 @@ class Runner:
         new_settings[3] &= ~termios.ECHO
         os.set_blocking(fd, False)
         termios.tcsetattr(fd, termios.TCSADRAIN, new_settings)
-        return old_settings
+        self.copy_input_run.set()
 
-    def __restore_terminal(self, settings):
+        yield None
+
+        self.copy_input_run.clear()
         fd = sys.stdin.fileno()
         os.set_blocking(fd, True)
-        termios.tcsetattr(fd, termios.TCSADRAIN, settings)
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
-    def cwd(self) -> str:
-        _, path = self("pwd", _echo=False, _ret_code=False)
-        return path
 
-    def __last_ret_code(self) -> int:
-        _, code = self("echo $?", _echo=False, _ret_code=False)
-        return int(code)
+class Terminal:
 
-    def __call__(self, cmd: str, _echo=True, _ret_code=True) -> (int, str):
-        self.__update_win_size()
-        self.__read_output_all()
+    def __init__(self, cmd):
+        self.master_fd, self.slave_fd = pty.openpty()
+        self.subp = subprocess.Popen(
+            cmd,
+            stdin=self.slave_fd,
+            stdout=self.slave_fd,
+            stderr=self.slave_fd,
+            start_new_session=True,
+            shell=True,
+        )
+        os.set_blocking(self.master_fd, False)
 
-        cmd = bytes(cmd + '\n', encoding="utf-8")
-        self.proc.send(cmd)
-        self.proc.read_nonblocking(len(cmd) + 1, timeout=1)
-        settings = self.__setup_terminal()
+    def send(self, data):
+        if isinstance(data, str):
+            data = bytes(data, encoding="utf-8")
+        count = len(data)
+        while count > 0:
+            count -= os.write(self.master_fd, data)
 
-        self.stop.clear()
-        thread = Thread(target=self.__copy_stdin)
-        thread.daemon = True
-        thread.start()
-        output = self.__copy_output(_echo)
-        self.stop.set()
-        self.__restore_terminal(settings)
-        output = self.__get_final_text(output)
-        thread.join()
+    def read_nonblocking(self, count):
+        """read at most `count`` bytes"""
+        return os.read(self.master_fd, count)
 
-        if _ret_code:
-            code = self.__last_ret_code()
-        else:
-            code = None
+    def read(self, count):
+        """read at most `count` bytes, blocking"""
+        readable, _, _ = select.select([self.master_fd], [], [])
+        assert self.master_fd in readable
+        return os.read(self.master_fd, count)
 
-        return code, output
+    def read_exact(self, count):
+        """read exactly count bytes, blocking"""
+        data = b''
+        while count > 0:
+            try:
+                d = os.read(self.master_fd, count)
+            except BlockingIOError:
+                d = b''
+            count -= len(d)
+            data += d
+
+    def setwinsize(self, rows, cols):
+        s = struct.pack('HHHH', rows, cols, 0, 0)
+        fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, s)
 
 
 def agent_print(*args, **kwargs):
