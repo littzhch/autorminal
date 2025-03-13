@@ -165,6 +165,7 @@ def read_prompt(cwd) -> str:
         except KeyboardInterrupt:
             print()
         except EOFError:
+            print("\033[0m")
             exit()
 
 
@@ -261,6 +262,8 @@ class Runner:
     def __copy_input(self):
         while self.copy_input_run.wait():
             readable, _, _ = select.select([sys.stdin], [], [])
+            if not self.copy_input_run.is_set():
+                continue
             if sys.stdin not in readable:
                 continue
             ch = sys.stdin.buffer.read(4096)
