@@ -3,9 +3,11 @@ import sys
 import fcntl
 import termios
 import struct
+import signal
 import argparse
 import select
 import json
+import time
 from io import StringIO
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
@@ -16,6 +18,7 @@ import pty
 
 from openai import OpenAI
 import pyte
+import psutil
 
 
 class DSChat(ABC):
@@ -127,11 +130,9 @@ def main():
     parser.add_argument('--no-check', action='store_true', help='是否禁用检查（开关参数）')
     args = parser.parse_args()
 
-    client = OpenAI(api_key=args.llm_key, base_url=args.llm_url)
-
     system_prompt = """\
 你是一个擅长执行类unix终端命令的专家，你可以控制 user 的终端。\
-你的工作是根据 user 的诉求和已经执行的命令，\
+你的工作是根据 user 提出的 task 和已经执行的命令\
 决定下一步需要在终端执行的命令。
 输出格式为 JSON:
 { \"idea\": \"你的思路\", \"cmd\": \"ls -l xxx\"}
@@ -142,56 +143,99 @@ def main():
 2. 一次请只执行一条命令
 3. 可以执行 cd 命令
 """
-
+    client = OpenAI(api_key=args.llm_key, base_url=args.llm_url)
     bot = ChatBot(system_prompt, client=client, model=args.llm_model)
-    if args.prompt:
-        user_prompt = args.prompt
-    else:
-        user_prompt = agent_input("Your prompt > ")
-    bot_words = bot(user_prompt)
-    runner = Runner()
-    user_name = getpass.getuser()
+    prompt_runner = PromptRunner(bot, check=not args.no_check)
 
     while True:
+        prompt = read_prompt(prompt_runner.cwd())
         try:
-            bot_words = json.loads(bot_words)
-        except json.JSONDecodeError:
-            agent_print("llm output parsing failed:", bot_words, "retry...")
-            bot_words = bot.retry()
-            continue
+            prompt_runner(prompt)
+        except KeyboardInterrupt:
+            pass
 
-        if bot_words["cmd"] == "":
-            break
 
+def read_prompt(cwd) -> str:
+    agent_print(cwd)
+    while True:
+        try:
+            prompt = agent_input("> ").strip()
+            if prompt != "":
+                return prompt
+        except KeyboardInterrupt:
+            print()
+        except EOFError:
+            exit()
+
+
+class PromptRunner:
+
+    def __init__(self, chatbot: ChatBot, check=True):
+        self.check = check
+        self.bot = chatbot
+        self.runner = Runner()
+        self.user_name = getpass.getuser()
+
+    def cwd(self):
+        return self.runner.cwd()
+
+    def __call__(self, user_prompt):
+        self.bot.clear_ctx()
+        user_message = {
+            "user": self.user_name,
+            "cwd": self.cwd(),
+            "task": user_prompt,
+        }
+        with spinning(" Thinking...", ["-", "\\", "|", "/"]):
+            bot_words = self.bot(json.dumps(user_message, ensure_ascii=False))
+
+        while True:
+            try:
+                bot_words = json.loads(bot_words)
+            except json.JSONDecodeError:
+                agent_print("llm output parsing failed:", bot_words,
+                            "retry...")
+                bot_words = self.bot.retry()
+                continue
+
+            if bot_words["cmd"] == "":
+                break
+
+            agent_print(bot_words["idea"])
+            cmd: str = bot_words["cmd"]
+            agent_print_cmd(cmd)
+            if self.check and (user := agent_input(
+                    "run(enter) or reject and say to ai > ").strip()) != "":
+                ret = {
+                    "user": self.user_name,
+                    "cwd": self.runner.cwd(),
+                    "return_code": 255,
+                    "output": f"User rejected your command. User said: {user}"
+                }
+            else:
+                ret_code, output = self.runner(cmd)
+                if ret_code == 0:
+                    agent_print("\033[32m0 OK\033[0m")
+                else:
+                    agent_print(f"\033[31m{ret_code} ERR\033[0m")
+                ret = {
+                    "user": self.user_name,
+                    "cwd": self.runner.cwd(),
+                    "return_code": ret_code,
+                    "output": output,
+                }
+            with spinning(" Thinking...", ["-", "\\", "|", "/"]):
+                bot_words = self.bot(str(ret))
+
+        summary_print(self.bot.messages)
         agent_print(bot_words["idea"])
-        cmd: str = bot_words["cmd"]
-        agent_print_cmd(cmd)
-        if (not args.no_check) and (user := agent_input(
-                "run(enter) or reject and say to ai?").strip()) != "":
-            ret = {
-                "user": user_name,
-                "cwd": runner.cwd(),
-                "return_code": 255,
-                "output": f"User rejected your command. User said: {user}"
-            }
-        else:
-            ret_code, output = runner(cmd)
-            ret = {
-                "user": user_name,
-                "cwd": runner.cwd(),
-                "return_code": ret_code,
-                "output": output,
-            }
-        bot_words = bot(str(ret))
-
-    summary_print(bot.messages)
-    agent_print(bot_words["idea"])
+        print()
 
 
 class Runner:
 
     def __init__(self):
-        self.proc = Terminal("bash --posix")
+        self.proc = Terminal(["bash", "--posix"])
         self.__update_win_size()
         # end_str 不要直接写出来，不然 cat main.py 会出问题
         self.end_str = b"\x5f\x5f\x41\x55\x54\x4f\x52\x4d\x49\x4e\x41\x4c\x5f\x45\x4e\x44\x5f\x5f"
@@ -321,9 +365,12 @@ class Runner:
         os.set_blocking(fd, False)
         termios.tcsetattr(fd, termios.TCSADRAIN, new_settings)
         self.copy_input_run.set()
+        old_handler = signal.signal(signal.SIGINT,
+                                    lambda signum, frame: self.proc.ctrlc())
 
         yield None
 
+        signal.signal(signal.SIGINT, old_handler)
         self.copy_input_run.clear()
         fd = sys.stdin.fileno()
         os.set_blocking(fd, True)
@@ -340,7 +387,6 @@ class Terminal:
             stdout=self.slave_fd,
             stderr=self.slave_fd,
             start_new_session=True,
-            shell=True,
         )
         os.set_blocking(self.master_fd, False)
 
@@ -376,6 +422,13 @@ class Terminal:
         s = struct.pack('HHHH', rows, cols, 0, 0)
         fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, s)
 
+    def ctrlc(self):
+        for p in psutil.Process(self.subp.pid).children(recursive=True):
+            try:
+                os.kill(p.pid, signal.SIGINT)
+            except PermissionError:
+                print("permission")
+
 
 def agent_print(*args, **kwargs):
     print("\033[94m", end="")
@@ -401,12 +454,38 @@ def agent_input(*args, **kwargs):
 
 def summary_print(messages: list):
     agent_print("SUMMARY")
-    agent_print(messages[1]["content"])
+    agent_print(json.loads(messages[1]["content"])["task"])
     for message in messages:
         if message["role"] == "assistant":
             cmd = json.loads(message["content"])["cmd"].strip()
             if cmd != "":
                 agent_print_cmd(cmd)
+
+
+@contextmanager
+def spinning(text: str, spinner_seq: [str]):
+    stop = Event()
+
+    def spin():
+        while True:
+            for spinner in spinner_seq:
+                print(f"{spinner}{text}\r", end="")
+                time.sleep(0.3)
+                if stop.is_set():
+                    print(f"{' ' * (len(spinner) + len(text))}\r", end="")
+                    return
+
+    thread = Thread(target=spin)
+    thread.daemon = True
+    thread.start()
+    print("\033[?25l", end="")
+
+    try:
+        yield None
+    finally:
+        print("\033[?25h", end="")
+        stop.set()
+        thread.join()
 
 
 if __name__ == "__main__":
