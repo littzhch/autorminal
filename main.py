@@ -8,6 +8,7 @@ import argparse
 import select
 import json
 import time
+import readline
 from io import StringIO
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
@@ -167,6 +168,28 @@ def read_prompt(cwd) -> str:
         except EOFError:
             print("\033[0m")
             exit()
+
+
+def history_based_completer(text, state):
+    matches = []
+    history_length = readline.get_current_history_length()
+    for i in range(1, history_length + 1):
+        item = readline.get_history_item(i)
+        if item.startswith(text):
+            matches.append(item)
+
+    unique_matches = []
+    seen = set()
+    for item in matches:
+        if item not in seen:
+            seen.add(item)
+            unique_matches.append(item)
+
+    return unique_matches[state] if state < len(unique_matches) else None
+
+
+readline.set_completer(history_based_completer)
+readline.parse_and_bind("tab: complete")
 
 
 class PromptRunner:
@@ -448,8 +471,8 @@ def agent_print_cmd(cmd: str):
 
 
 def agent_input(*args, **kwargs):
-    print("\033[94m[Autorminal]\033[0m ", end="")
-    print("\033[94m", end="")
+    args = list(args)
+    args[0] = f"\033[94m[Autorminal] {args[0]}"
     result = input(*args, **kwargs)
     print("\033[0m", end="", flush=True)
     return result
