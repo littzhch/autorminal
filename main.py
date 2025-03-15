@@ -22,97 +22,6 @@ import pyte
 import psutil
 
 
-class DSChat(ABC):
-
-    @abstractmethod
-    def __init__(self, sys_prompt, client, model, temperature) -> None:
-        pass
-
-    @abstractmethod
-    def __call__(self, content) -> str:
-        pass
-
-
-class StatelessChat(DSChat):
-
-    def __init__(self, sys_prompt, client, model, temperature=0.3):
-        self.sys_prompt = sys_prompt
-        self.model = model
-        self.client = client
-        self.temperature = temperature
-
-    def __call__(self, content) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{
-                "role": "system",
-                "content": self.sys_prompt
-            }, {
-                "role": "user",
-                "content": content,
-            }],
-            temperature=self.temperature,
-            stream=True,
-        )
-
-        result = ""
-
-        for chunk in response:
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                if (not hasattr(delta, 'reasoning_content')
-                    ) or delta.reasoning_content is None:
-                    result += delta.content
-
-        return result
-
-
-class ChatBot(DSChat):
-
-    def __init__(self, sys_prompt, client, model, temperature=0.3):
-        self.model = model
-        self.messages = [{"role": "system", "content": sys_prompt}]
-        self.client = client
-        self.temperature = temperature
-
-    def __call__(self, content) -> str:
-        self.messages.append({
-            "role": "user",
-            "content": content,
-        })
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=self.messages,
-            temperature=self.temperature,
-            stream=True)
-
-        result = ""
-
-        for chunk in response:
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                if (not hasattr(delta, 'reasoning_content')
-                    ) or delta.reasoning_content is None:
-                    result += delta.content
-
-        self.messages.append({"role": "assistant", "content": result})
-        return result
-
-    def retry(self):
-        assert self.messages[-1]["role"] == "assistant"
-        assert self.messages[-2]["role"] == "user"
-        self.messages.pop()
-        user = self.messages.pop()["content"]
-        return self(user)
-
-    def replace_last_reply(self, new_content):
-        assert self.messages[-1]["role"] == "assistant"
-        self.messages[-1]["content"] = new_content
-
-    def clear_ctx(self):
-        self.messages = [self.messages[0]]
-
-
 def main():
     parser = argparse.ArgumentParser(description="处理LLM相关参数")
     parser.add_argument('--prompt', type=str, help='用户的需求描述')
@@ -131,7 +40,56 @@ def main():
     parser.add_argument('--no-check', action='store_true', help='是否禁用检查（开关参数）')
     args = parser.parse_args()
 
-    system_prompt = """\
+    llm = LLM(args.llm_url, args.llm_model, args.llm_key)
+    agent = SimpleAgent(llm)
+    runner = Runner()
+    prompt_runner = PromptRunner(agent, runner, not args.no_check)
+    while True:
+        prompt = read_prompt(runner.cwd())
+        try:
+            prompt_runner(prompt)
+        except KeyboardInterrupt:
+            pass
+
+
+class LLM:
+
+    def __init__(self, url, model, key):
+        self.client = OpenAI(api_key=key, base_url=url)
+        self.model = model
+
+    def __call__(self, messages, temperature=0.3) -> str:
+        response = self.client.chat.completions.create(model=self.model,
+                                                       messages=messages,
+                                                       temperature=temperature,
+                                                       stream=True)
+
+        result = ""
+
+        for chunk in response:
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                if (not hasattr(delta, 'reasoning_content')
+                    ) or delta.reasoning_content is None:
+                    result += delta.content
+
+        return result
+
+
+class Agent(ABC):
+
+    @abstractmethod
+    def set_user_prompt(self, prompt: str, user: str,
+                        cwd: str) -> tuple[str, str]:
+        pass
+
+    @abstractmethod
+    def set_cmd_result(self, user, cwd, ret_code, output) -> tuple[str, str]:
+        pass
+
+
+class SimpleAgent(Agent):
+    sys_prompt = """\
 你是一个擅长执行类unix终端命令的专家，你可以控制 user 的终端。\
 你的工作是根据 user 提出的 task 和已经执行的命令\
 决定下一步需要在终端执行的命令。
@@ -141,19 +99,46 @@ def main():
 如果你觉得任务还要继续，请在 idea 当中简单说一下你下一步的思路，并在 cmd 中给出下一步的命令。
 注意：
 1. 输出以 { 开始， } 结束，在任何情况下请不要输出任何其它内容
-2. 一次请只执行一条命令
-3. 可以执行 cd 命令
 """
-    client = OpenAI(api_key=args.llm_key, base_url=args.llm_url)
-    bot = ChatBot(system_prompt, client=client, model=args.llm_model)
-    prompt_runner = PromptRunner(bot, check=not args.no_check)
 
-    while True:
-        prompt = read_prompt(prompt_runner.cwd())
-        try:
-            prompt_runner(prompt)
-        except KeyboardInterrupt:
-            pass
+    def __init__(self, llm: LLM):
+        self.llm = llm
+        self.messages = [{"role": "system", "content": SimpleAgent.sys_prompt}]
+
+    def set_user_prompt(self, prompt, user, cwd):
+        self.messages = self.messages[0:1]
+        msg = {
+            "user": user,
+            "cwd": cwd,
+            "task": prompt,
+        }
+        self.messages.append({"role": "user", "content": str(msg)})
+        self._produce_output()
+        result = json.loads(self.messages[-1]["content"])
+        return result["idea"], result["cmd"]
+
+    def set_cmd_result(self, user, cwd, ret_code, output):
+        ret_message = {
+            "user": user,
+            "cwd": cwd,
+            "return_code": ret_code,
+            "output": output,
+        }
+        self.messages.append({"role": "user", "content": str(ret_message)})
+        self._produce_output()
+        result = json.loads(self.messages[-1]["content"])
+        return result["idea"], result["cmd"]
+
+    def _produce_output(self):
+        assert self.messages[-1]["role"] == "user"
+        result = self.llm(self.messages, temperature=0.3)
+        while True:
+            try:
+                json.loads(result)
+                break
+            except json.JSONDecodeError:
+                result = self.llm(self.messages, temperature=0.3)
+        self.messages.append({"role": "assistant", "content": result})
 
 
 def read_prompt(cwd) -> str:
@@ -194,66 +179,51 @@ readline.parse_and_bind("tab: complete")
 
 class PromptRunner:
 
-    def __init__(self, chatbot: ChatBot, check=True):
+    def __init__(self, agent: "Agent", runner: "Runner", check=True):
         self.check = check
-        self.bot = chatbot
-        self.runner = Runner()
+        self.agent = agent
+        self.runner = runner
         self.user_name = getpass.getuser()
 
     def cwd(self):
         return self.runner.cwd()
 
     def __call__(self, user_prompt):
-        self.bot.clear_ctx()
-        user_message = {
-            "user": self.user_name,
-            "cwd": self.cwd(),
-            "task": user_prompt,
-        }
+        history = []
         with spinning(" Thinking...", ["-", "\\", "|", "/"]):
-            bot_words = self.bot(json.dumps(user_message, ensure_ascii=False))
+            idea, cmd = self.agent.set_user_prompt(user_prompt, self.user_name,
+                                                   self.cwd())
 
         while True:
-            try:
-                bot_words = json.loads(bot_words)
-            except json.JSONDecodeError:
-                agent_print("llm output parsing failed:", bot_words,
-                            "retry...")
-                bot_words = self.bot.retry()
-                continue
-
-            if bot_words["cmd"] == "":
+            if cmd == "":
                 break
 
-            agent_print(bot_words["idea"])
-            cmd: str = bot_words["cmd"]
+            agent_print(idea)
             agent_print_cmd(cmd)
             if self.check and (user := agent_input(
                     "run(enter) or reject and say to ai > ").strip()) != "":
-                ret = {
-                    "user": self.user_name,
-                    "cwd": self.runner.cwd(),
-                    "return_code": 255,
-                    "output": f"User rejected your command. User said: {user}"
-                }
+                cwd = self.cwd(),
+                return_code = 255
+                output = f"User rejected your command. User said: {user}"
             else:
-                ret_code, output = self.runner(cmd)
-                if ret_code == 0:
+                return_code, output = self.runner(cmd)
+                cwd = self.cwd()
+                if return_code == 0:
                     agent_print("\033[32m0 OK\033[0m")
                 else:
-                    agent_print(f"\033[31m{ret_code} ERR\033[0m")
-                ret = {
-                    "user": self.user_name,
-                    "cwd": self.runner.cwd(),
-                    "return_code": ret_code,
-                    "output": output,
-                }
-            with spinning(" Thinking...", ["-", "\\", "|", "/"]):
-                bot_words = self.bot(str(ret))
+                    agent_print(f"\033[31m{return_code} ERR\033[0m")
+                history.append((cmd, return_code))
 
-        summary_print(self.bot.messages)
-        agent_print(bot_words["idea"])
-        print()
+            with spinning(" Thinking...", ["-", "\\", "|", "/"]):
+                idea, cmd = self.agent.set_cmd_result(self.user_name, cwd,
+                                                      return_code, output)
+
+        agent_print("SUMMARY")
+        for (cmd, ret_code) in history:
+            agent_print(
+                f"\033[93m{cmd}\033[0m", "\033[32m0 OK\033[0m"
+                if ret_code == 0 else f"\033[31m{ret_code} ERR\033[0m")
+        agent_print(idea)
 
 
 class Runner:
@@ -478,18 +448,8 @@ def agent_input(*args, **kwargs):
     return result
 
 
-def summary_print(messages: list):
-    agent_print("SUMMARY")
-    agent_print(json.loads(messages[1]["content"])["task"])
-    for message in messages:
-        if message["role"] == "assistant":
-            cmd = json.loads(message["content"])["cmd"].strip()
-            if cmd != "":
-                agent_print_cmd(cmd)
-
-
 @contextmanager
-def spinning(text: str, spinner_seq: [str]):
+def spinning(text: str, spinner_seq: list[str]):
     stop = Event()
 
     def spin():
