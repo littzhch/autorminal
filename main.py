@@ -41,7 +41,7 @@ def main():
     args = parser.parse_args()
 
     llm = LLM(args.llm_url, args.llm_model, args.llm_key)
-    agent = SimpleAgent(llm)
+    agent = ReflectionAgent(llm)
     runner = Runner()
     prompt_runner = PromptRunner(agent, runner, not args.no_check)
     while True:
@@ -90,15 +90,17 @@ class Agent(ABC):
 
 class SimpleAgent(Agent):
     sys_prompt = """\
-你是一个擅长执行类unix终端命令的专家，你可以控制 user 的终端。\
+你是一个擅长执行类unix终端命令的专家，你的名字叫 Autorminal AI。你可以控制 user 的终端。\
 你的工作是根据 user 提出的 task 和已经执行的命令\
 决定下一步需要在终端执行的命令。
 输出格式为 JSON:
-{ \"idea\": \"你的思路\", \"cmd\": \"ls -l xxx\"}
+{ \"idea\": \"你的思路或结果\", \"cmd\": \"ls -l xxx\"}
 当你认为任务已经完成的时候，请在 idea 中向用户汇报任务结果，并将 cmd 设置为空；\
-如果你觉得任务还要继续，请在 idea 当中简单说一下你下一步的思路，并在 cmd 中给出下一步的命令。
+如果你觉得任务还要继续，请在 idea 当中用一句话说一下你下一步的思路，并在 cmd 中给出下一步的命令。
 注意：
 1. 输出以 { 开始， } 结束，在任何情况下请不要输出任何其它内容
+2. 你不能干涉命令运行过程，所以尽量不要使用交互式的命令
+3. 不要编造文件名、文件路径，如果不清楚请使用命令查证
 """
 
     def __init__(self, llm: LLM):
@@ -139,6 +141,17 @@ class SimpleAgent(Agent):
             except json.JSONDecodeError:
                 result = self.llm(self.messages, temperature=0.3)
         self.messages.append({"role": "assistant", "content": result})
+
+
+class ReflectionAgent(SimpleAgent):
+
+    def _produce_output(self):
+        super()._produce_output()
+        origin_msg = json.loads(self.messages[-1]["content"])
+        if "echo" in origin_msg["cmd"]:
+            self.messages = self.messages[:-1]
+            self.messages[-1]["content"] += "注意：请使用cat命令代替echo命令"
+            super()._produce_output()
 
 
 def read_prompt(cwd) -> str:
@@ -322,6 +335,7 @@ class Runner:
 
     def __last_ret_code(self) -> int:
         code = self.__run_simple("echo $?")
+        code = code.split("\n", maxsplit=1)[0]
         return int(code)
 
     def __run_simple(self, cmd) -> str:
