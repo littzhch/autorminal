@@ -41,7 +41,7 @@ def main():
     args = parser.parse_args()
 
     llm = LLM(args.llm_url, args.llm_model, args.llm_key)
-    agent = ReflectionAgent(llm)
+    agent = Agent3(llm)
     runner = Runner()
     prompt_runner = PromptRunner(agent, runner, not args.no_check)
     while True:
@@ -152,6 +152,156 @@ class ReflectionAgent(SimpleAgent):
             self.messages = self.messages[:-1]
             self.messages[-1]["content"] += "注意：请使用cat命令代替echo命令"
             super()._produce_output()
+
+
+class Agent3(Agent):
+    sys_prompt = """\
+你是一个擅长执行类unix终端命令的专家，你的名字叫 Autorminal AI。你可以控制 user 的终端。\
+你的工作是根据 user 提出的 task 和已经执行的命令\
+决定下一步需要在终端执行的命令。
+输出格式为 JSON:
+{ \"idea\": \"你的思路或结果\", \"cmd\": \"ls -l xxx\"}
+当你认为任务已经完成的时候，请在 idea 中向用户汇报任务结果，并将 cmd 设置为空；\
+如果你觉得任务还要继续，请在 idea 当中用一句话说一下你下一步的思路，并在 cmd 中给出下一步的命令。
+注意：
+1. 输出以 { 开始， } 结束，在任何情况下请不要输出任何其它内容
+2. 一次请只执行一条命令，如果滥用 &&，你就死定了
+2. 你不能干涉命令运行过程，所以尽量不要使用交互式的命令
+3. 不要编造文件名、文件路径，如果不清楚请使用命令查证
+"""
+    sys_prompt2 = """\
+你是一个给bash表达式成分分析的专家，你的工作是给一个bash表达式或命令分析成分：\
+0. 各种包管理器安装或删除包
+1. 查看一个文件的内容
+2. 向一个文件中写入内容
+3. 程序编译
+输出格式为 [n,m,...]，输出以 [ 开始， ] 结束，在任何情况下请不要输出任何其他内容
+
+例如：
+输入: cd Desktop && apt update
+输出: [0]
+
+输入: pip install numpy && cat README.md
+输出: [0, 1]
+
+输入: cd ~
+输出: []
+
+输入: cat hello.c
+输出: [1]
+
+输入: cat "hello" > hello.txt
+输出: [2]
+"""
+
+    def __init__(self, llm: LLM):
+        self.llm = llm
+        self.round = 0
+        self.messages = [{"role": "system", "content": Agent3.sys_prompt}]
+        self.thread = Thread(target=self._reduce_ctx_length)
+        self.thread.daemon = True
+        self.thread.start()
+
+    def _reduce_ctx_length(self):
+        current_round = self.round
+        ind = 2
+        while True:
+            time.sleep(1)
+
+            if self.round > current_round:
+                current_round = self.round
+                ind = 2
+
+            if ind > len(self.messages) - 8:
+                continue
+
+            if len(self.messages[ind + 1]["content"]) > 1:
+                answer = json.loads(self.messages[ind + 1]["content"])
+                msg = json.loads(self.messages[ind]["content"])["cmd"]
+                while True:
+                    result = self.llm([{
+                        "role": "system",
+                        "content": Agent3.sys_prompt2
+                    }, {
+                        "role": "user",
+                        "content": msg
+                    }])
+                    try:
+                        result = json.loads(result)
+                        break
+                    except json.JSONDecodeError:
+                        pass
+                print("=========start")
+                if 0 in result:
+                    answer[
+                        "output"] = f"""{answer["output"][:20]} ... SKIP ... {answer["output"][-150:]}"""
+                elif 2 in result:
+                    answer["output"] = f"IGNORED"
+                elif 3 in result:
+                    answer["output"] = "... SKIP ..." + answer["output"][-150:]
+                else:
+                    ind += 2
+                    continue
+                print("======= 压缩 =======", answer["output"])
+                self.messages[ind + 1]["content"] = json.dumps(
+                    answer, ensure_ascii=False)
+                ind += 2
+
+    def set_user_prompt(self, prompt, user, cwd):
+        self.messages = self.messages[0:1]
+        self.round += 1
+        msg = {
+            "user": user,
+            "cwd": cwd,
+            "task": prompt,
+        }
+        self.messages.append({
+            "role": "user",
+            "content": json.dumps(msg, ensure_ascii=False)
+        })
+        self._produce_output()
+        result = json.loads(self.messages[-1]["content"])
+        return result["idea"], result["cmd"]
+
+    def set_cmd_result(self, user, cwd, ret_code, output):
+        ret_message = {
+            "user": user,
+            "cwd": cwd,
+            "return_code": ret_code,
+            "output": output,
+        }
+        self.messages.append({
+            "role":
+            "user",
+            "content":
+            json.dumps(ret_message, ensure_ascii=False)
+        })
+        self._produce_output()
+        result = json.loads(self.messages[-1]["content"])
+        if result["cmd"] == "":
+            print(self.messages)
+        return result["idea"], result["cmd"]
+
+    def _produce_json(self):
+        assert self.messages[-1]["role"] == "user"
+        result = self.llm(self.messages, temperature=0.3)
+        while True:
+            try:
+                json.loads(result)
+                break
+            except json.JSONDecodeError:
+                result = self.llm(self.messages, temperature=0.3)
+        self.messages.append({"role": "assistant", "content": result})
+
+    def _produce_output(self):
+        self._produce_json()
+        origin_msg = json.loads(self.messages[-1]["content"])
+        if "echo" in origin_msg["cmd"]:
+            self.messages = self.messages[:-1]
+            origin = self.messages[-1]["content"]
+            self.messages[-1]["content"] += "注意：向文件中写入时请使用cat命令代替echo命令"
+            self._produce_json()
+            self.messages[-2]["content"] = origin
 
 
 def read_prompt(cwd) -> str:
