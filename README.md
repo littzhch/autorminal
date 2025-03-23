@@ -2,10 +2,22 @@
 
 一个简单的面向终端的 AI Agent，帮你用自然语言操作终端。
 
-## 使用说明
+## Installation and Usage
+
+### Using pip
 ```bash
-pip install -r requirements.txt
-python3 main.py --llm-key sk-your-ds-key # 默认使用 api.deepseek.com 的 DeepSeek V3
+pip3 install autorminal             # installation
+autorminal --help                   # usage info
+autorminal --llm-key sk-your-ds-key # start autorminal with offcial deepseek-v3 api
+```
+
+### Using pdm
+```bash
+git clone https://github.com/littzhch/autorminal.git # clone this repo
+cd autorminal
+pdm install                                          # installation
+pdm run autorminal --help                            # usage info
+pdm run autorminal --llm-key sk-your-ds-key          # start autorminal with offcial deepseek-v3 api
 ```
 
 ## LICENSE
