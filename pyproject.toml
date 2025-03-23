@@ -1,6 +1,6 @@
 [project]
 name = "autorminal"
-version = "0.1.0"
+version = "0.1.1"
 description = "A simple AI agent for unix-like terminal"
 authors = [
     {name = "littzhch", email = "2371050115@qq.com"},
@@ -9,6 +9,9 @@ dependencies = ["openai>=1.68.2", "pyte>=0.8.2", "psutil>=7.0.0"]
 requires-python = ">=3.10"
 readme = "README.md"
 license = {text = "GLWTPL"}
+
+[project.urls]
+Repository = "https://github.com/littzhch/autorminal.git"
 
 
 [project.scripts]
